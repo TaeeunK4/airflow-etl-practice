@@ -1,11 +1,10 @@
+import os
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.dates import days_ago
-import os
-from s3_upload_csv import s3_upload_csv
+from scripts.s3_upload_csv import s3_upload_csv
 
 BUCKET_NAME = "ivekorea-airflow-practice-taeeunk"
 LOCAL_PATH = "/opt/airflow/data"
@@ -21,10 +20,15 @@ default_args = {
 }
 
 with DAG(
-    dag_id = "ive_s3_upload_snowflake_load_pipeline",
+    dag_id = "ive_upload_clean_pipeline",
     default_args = default_args,
     schedule_interval = "@daily",
-    tags = ["ive", "upload", "to_csv", "s3"]
+    template_searchpath = [
+        '/opt/airflow/dbt_project/models/clean',
+        '/opt/airflow/dbt_project/models/left_join',        
+        '/opt/airflow/dbt_project/models/utils'        
+    ],
+    tags = ["ive", "to_csv", "s3"]
 ) as dag:
     # Task 1 : Snowflake WH, DB, SCHEMA, STAGE setup
     with TaskGroup("Snowflake_setup_env") as Snowflake_setup_env:
@@ -46,7 +50,7 @@ with DAG(
     ]
         )
     # Task 2 : ive_list s3 upload -> snowflake load
-    with TaskGroup("upload_snowflake_list") as upload_snowflake_list:
+    with TaskGroup("S3_upload") as S3_upload:
         upload_list = PythonOperator(
             task_id = "upload_s3_list",
             python_callable = s3_upload_csv,
@@ -68,33 +72,6 @@ with DAG(
                     ]
             }
         )
-        load_list = SnowflakeOperator(
-            task_id = "load_snowflake_list",
-            snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql = [
-               """
-                CREATE OR REPLACE TABLE {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_LIST_RAW (
-                    ADS_IDX NUMBER, ADV_IDX NUMBER, SCH_IDX NUMBER, ADS_TYPE NUMBER,
-                    ADS_CATEGORY NUMBER, ADS_NAME VARCHAR, ADS_SUMMARY VARCHAR,
-                    ADS_GUIDE VARCHAR, ADS_SAVE_WAY VARCHAR, ADS_SDATE TIMESTAMP,
-                    ADS_EDATE TIMESTAMP, ADS_OS_TYPE NUMBER, ADS_CONTRACT_PRICE NUMBER,
-                    ADS_REWARD_PRICE NUMBER, ADS_ORDER NUMBER, ADS_REJOIN_TYPE VARCHAR,
-                    ADS_REQUIRE_ADID VARCHAR
-                );
-                """,
-                """
-                COPY INTO {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_LIST_RAW
-                FROM @{{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.{{ var.value.STAGE_NAME }}/ive_list/
-                FILE_FORMAT = (TYPE = 'CSV', SKIP_HEADER = 1, FIELD_OPTIONALLY_ENCLOSED_BY = '"')
-                ON_ERROR = 'CONTINUE';
-                """ 
-            ]
-        )
-        # upload_snowflake_list task 순서 지정
-        upload_list >> load_list
-
-    # Task 3 : ive_sch s3 upload -> snowflake load
-    with TaskGroup("upload_snowflake_sch") as upload_snowflake_sch:
         upload_sch = PythonOperator(
             task_id = "upload_s3_sch",
             python_callable = s3_upload_csv,
@@ -114,29 +91,6 @@ with DAG(
                     ]
             }
         )
-        load_sch = SnowflakeOperator(
-            task_id = "load_snowflake_sch",
-            snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql = [
-               """
-                CREATE OR REPLACE TABLE {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_SCH_RAW (
-                    SCH_IDX NUMBER, ADS_IDX NUMBER, MDA_IDX_ARR VARCHAR,
-                    SCH_CLK_NUM NUMBER, SCH_TURN_NUM NUMBER, SCH_TYPE VARCHAR
-                );
-                """,
-                """
-                COPY INTO {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_SCH_RAW
-                FROM @{{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.{{ var.value.STAGE_NAME }}/ive_sch/
-                FILE_FORMAT = (TYPE = 'CSV', SKIP_HEADER = 1, FIELD_OPTIONALLY_ENCLOSED_BY = '"')
-                ON_ERROR = 'CONTINUE';
-                """ 
-            ]
-        )
-        # upload_snowflake_sch task 순서 지정
-        upload_sch >> load_sch
-
-    # Task 4 : ive_year s3 upload -> snowflake load
-    with TaskGroup("upload_snowflake_year") as upload_snowflake_year:
         YEAR_PATH = os.path.join(LOCAL_PATH, "ive_year")
         # ive_year_{i} all check
         if os.path.exists(YEAR_PATH):
@@ -166,6 +120,48 @@ with DAG(
                     ]
             }
         )
+
+    with TaskGroup("Snowflake_load") as Snowflake_load:
+        load_list = SnowflakeOperator(
+            task_id = "load_snowflake_list",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = [
+               """
+                CREATE OR REPLACE TABLE {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_LIST_RAW (
+                    ADS_IDX NUMBER, ADV_IDX NUMBER, SCH_IDX NUMBER, ADS_TYPE NUMBER,
+                    ADS_CATEGORY NUMBER, ADS_NAME VARCHAR, ADS_SUMMARY VARCHAR,
+                    ADS_GUIDE VARCHAR, ADS_SAVE_WAY VARCHAR, ADS_SDATE TIMESTAMP,
+                    ADS_EDATE TIMESTAMP, ADS_OS_TYPE NUMBER, ADS_CONTRACT_PRICE NUMBER,
+                    ADS_REWARD_PRICE NUMBER, ADS_ORDER NUMBER, ADS_REJOIN_TYPE VARCHAR,
+                    ADS_REQUIRE_ADID VARCHAR
+                );
+                """,
+                """
+                COPY INTO {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_LIST_RAW
+                FROM @{{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.{{ var.value.STAGE_NAME }}/ive_list/
+                FILE_FORMAT = (TYPE = 'CSV', SKIP_HEADER = 1, FIELD_OPTIONALLY_ENCLOSED_BY = '"')
+                ON_ERROR = 'CONTINUE';
+                """ 
+            ]
+        )
+        load_sch = SnowflakeOperator(
+            task_id = "load_snowflake_sch",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = [
+               """
+                CREATE OR REPLACE TABLE {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_SCH_RAW (
+                    SCH_IDX NUMBER, ADS_IDX NUMBER, MDA_IDX_ARR VARCHAR,
+                    SCH_CLK_NUM NUMBER, SCH_TURN_NUM NUMBER, SCH_TYPE VARCHAR
+                );
+                """,
+                """
+                COPY INTO {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.IVE_SCH_RAW
+                FROM @{{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }}.{{ var.value.STAGE_NAME }}/ive_sch/
+                FILE_FORMAT = (TYPE = 'CSV', SKIP_HEADER = 1, FIELD_OPTIONALLY_ENCLOSED_BY = '"')
+                ON_ERROR = 'CONTINUE';
+                """ 
+            ]
+        )
         load_year = SnowflakeOperator(
             task_id = "load_snowflake_year",
             snowflake_conn_id = SNOWFLAKE_CONN_ID,
@@ -185,14 +181,36 @@ with DAG(
                 """ 
             ]
         )
-        # upload_snowflake_year task 순서 지정
-        upload_year >> load_year 
 
-    with TaskGroup("Trigger_ive_snowflake_clean_pipeline") as Trigger_ive_snowflake_clean_pipeline:
-        trig_clean = TriggerDagRunOperator(
-            task_id = "Trigger_ive_snowflake_clean_pipeline",
-            trigger_dag_id = "ive_snowflake_clean_pipeline",
-            wait_for_completion = False
+    with TaskGroup("Snowflake_clean") as Snowflake_clean:
+        clean_list = SnowflakeOperator(
+            task_id = "Snowflake_clean_list",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = "clean_list.sql"
+        )
+        clean_sch = SnowflakeOperator(
+            task_id = "Snowflake_clean_sch",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = "clean_sch.sql"
+        )
+        clean_year = SnowflakeOperator(
+            task_id = "Snowflake_clean_year",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = "clean_year.sql"
         )
 
-Snowflake_setup_env >> [upload_snowflake_list, upload_snowflake_sch, upload_snowflake_year] >> Trigger_ive_snowflake_clean_pipeline
+    with TaskGroup("Snowflake_join") as Snowflake_join:
+        year_list_sch_join = SnowflakeOperator(
+            task_id = "Snowflake_join",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = "left_join.sql"
+        )
+
+    with TaskGroup("Snowflake_s3_upload") as Snowflake_s3_upload:
+        snowflake_s3_upload = SnowflakeOperator(
+            task_id = "Snowflake_s3_upload",
+            snowflake_conn_id = SNOWFLAKE_CONN_ID,
+            sql = "s3_upload.sql"
+        )
+
+[Snowflake_setup_env, S3_upload] >> Snowflake_load >> Snowflake_clean >> Snowflake_join >> Snowflake_s3_upload
