@@ -1,11 +1,10 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.dates import days_ago
-import sys
 import os
-sys.path.append("/opt/airflow/include/scripts")
 from s3_upload_csv import s3_upload_csv
 
 BUCKET_NAME = "ivekorea-airflow-practice-taeeunk"
@@ -32,7 +31,7 @@ with DAG(
         setup_env = SnowflakeOperator(
             task_id = "Snowflake_setup_env",
             snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql=[
+            sql = [
                 "CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH WITH WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE;",
                 "CREATE DATABASE IF NOT EXISTS {{ var.value.DATABASE_NAME }};",
                 "CREATE SCHEMA IF NOT EXISTS {{ var.value.DATABASE_NAME }}.{{ var.value.SCHEMA_NAME }};",
@@ -189,4 +188,11 @@ with DAG(
         # upload_snowflake_year task 순서 지정
         upload_year >> load_year 
 
-Snowflake_setup_env >> [upload_snowflake_list, upload_snowflake_sch, upload_snowflake_year]
+    with TaskGroup("Trigger_ive_snowflake_clean_pipeline") as Trigger_ive_snowflake_clean_pipeline:
+        trig_clean = TriggerDagRunOperator(
+            task_id = "Trigger_ive_snowflake_clean_pipeline",
+            trigger_dag_id = "ive_snowflake_clean_pipeline",
+            wait_for_completion = False
+        )
+
+Snowflake_setup_env >> [upload_snowflake_list, upload_snowflake_sch, upload_snowflake_year] >> Trigger_ive_snowflake_clean_pipeline
