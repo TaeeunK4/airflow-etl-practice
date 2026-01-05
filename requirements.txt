@@ -1,0 +1,5 @@
+apache-airflow-providers-amazon
+pandas
+openpyxl
+boto3
+pyarrow
