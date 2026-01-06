@@ -1,9 +1,12 @@
 import os
+from pathlib import Path
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.snowflake.operators.snowflake import SnowflakeOperator
 from airflow.utils.task_group import TaskGroup
 from airflow.utils.dates import days_ago
+from cosmos import DbtTaskGroup, ProjectConfig, ProfileConfig, ExecutionConfig
+from cosmos.profiles import SnowflakeUserPasswordProfileMapping
 from scripts.s3_upload_csv import s3_upload_csv
 
 BUCKET_NAME = "ivekorea-airflow-practice-taeeunk"
@@ -12,22 +15,29 @@ SNOWFLAKE_CONN_ID = "snowflake_con"
 DATABASE_NAME = "IVE_DATA"
 SCHEMA_NAME = "RAW_DATA"
 STAGE_NAME = "MY_S3_STAGE"
+DBT_PROJECT_PATH = Path("/opt/airflow/dbt_project")
 
 default_args = {
-    "owner" : 'Taeeun',
+    "owner" : "Taeeun",
     "start_date" : days_ago(1),
     "catchup" : False,
 }
+
+profile_config = ProfileConfig(
+    profile_name = "ive_dbt_project",
+    target_name = "dev",
+    profile_mapping = SnowflakeUserPasswordProfileMapping(
+        conn_id = SNOWFLAKE_CONN_ID,
+        profile_args = {"database" : "IVE_DATA", "schema" : "CLEAN"}
+    )
+)
 
 with DAG(
     dag_id = "ive_upload_clean_pipeline",
     default_args = default_args,
     schedule_interval = "@daily",
-    template_searchpath = [
-        '/opt/airflow/dbt_project/models/clean',
-        '/opt/airflow/dbt_project/models/left_join',        
-        '/opt/airflow/dbt_project/models/utils'        
-    ],
+    template_searchpath = '/opt/airflow/dbt_project/models/clean'    
+    ,
     tags = ["ive", "to_csv", "s3"]
 ) as dag:
     # Task 1 : Snowflake WH, DB, SCHEMA, STAGE setup
@@ -49,7 +59,7 @@ with DAG(
                 """
     ]
         )
-    # Task 2 : ive_list s3 upload -> snowflake load
+    # Task 2 : ive_list, ive_sch, ive_year s3 upload
     with TaskGroup("S3_upload") as S3_upload:
         upload_list = PythonOperator(
             task_id = "upload_s3_list",
@@ -120,7 +130,7 @@ with DAG(
                     ]
             }
         )
-
+    # Task 3 : ive_list, ive_sch, ive_year snowflake load
     with TaskGroup("Snowflake_load") as Snowflake_load:
         load_list = SnowflakeOperator(
             task_id = "load_snowflake_list",
@@ -181,31 +191,15 @@ with DAG(
                 """ 
             ]
         )
-
-    with TaskGroup("Snowflake_clean") as Snowflake_clean:
-        clean_list = SnowflakeOperator(
-            task_id = "Snowflake_clean_list",
-            snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql = "clean_list.sql"
-        )
-        clean_sch = SnowflakeOperator(
-            task_id = "Snowflake_clean_sch",
-            snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql = "clean_sch.sql"
-        )
-        clean_year = SnowflakeOperator(
-            task_id = "Snowflake_clean_year",
-            snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql = "clean_year.sql"
-        )
-
-    with TaskGroup("Snowflake_join") as Snowflake_join:
-        year_list_sch_join = SnowflakeOperator(
-            task_id = "Snowflake_join",
-            snowflake_conn_id = SNOWFLAKE_CONN_ID,
-            sql = "left_join.sql"
-        )
-
+    # Task 4 : ive_list, ive_sch, ive_year clean + join
+    Dbt_Snowflake_clean_join = DbtTaskGroup(
+        group_id = "Dbt_Snowflake_clean_join",
+        project_config = ProjectConfig(DBT_PROJECT_PATH),
+        profile_config = profile_config,
+        execution_config = ExecutionConfig(dbt_executable_path = "/usr/local/bin/dbt"),
+        operator_args= {"install_deps": True},
+    )
+    # Task 5 : clean + left_join data -> s3 upload
     with TaskGroup("Snowflake_s3_upload") as Snowflake_s3_upload:
         snowflake_s3_upload = SnowflakeOperator(
             task_id = "Snowflake_s3_upload",
@@ -213,4 +207,4 @@ with DAG(
             sql = "s3_upload.sql"
         )
 
-[Snowflake_setup_env, S3_upload] >> Snowflake_load >> Snowflake_clean >> Snowflake_join >> Snowflake_s3_upload
+[Snowflake_setup_env, S3_upload] >> Snowflake_load >> Dbt_Snowflake_clean_join >> Snowflake_s3_upload

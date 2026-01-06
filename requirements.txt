@@ -3,3 +3,5 @@ pandas
 openpyxl
 boto3
 pyarrow
+astronomer-cosmos
+dbt-snowflake
